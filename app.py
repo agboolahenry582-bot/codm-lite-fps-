@@ -1,97 +1,48 @@
-from flask import Flask, render_template_string
-from flask_socketio import SocketIO
+from flask import Flask, render_template_string, request
+from flask_socketio import SocketIO, emit
 import eventlet
-
 eventlet.monkey_patch()
-
 app = Flask(__name__)
-app.config['SECRET_KEY'] = 'codm_ultimate_secret_key_2026'
+app.config['SECRET_KEY'] = 'codm_secret_2026'
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
-
 PLAYERS = {}
-LEADERBOARD = {}
-
-# Paste your full HTML_TEMPLATE here - use the one you sent, but with this fix at bottom:
-
-HTML_TEMPLATE = """ ... your full HTML from above ... 
-
-        function setupMobileControls() {
-            const zone = document.getElementById('joystick-zone');
-            const knob = document.getElementById('joystick-knob');
-            const fireBtn = document.getElementById('mobile-fire');
-            let startX=0,startY=0,moveX=0,moveY=0,active=false;
-            zone.addEventListener('touchstart',(e)=>{
-                active=true;
-                let t=e.touches[0];
-                startX=t.clientX; startY=t.clientY;
-            });
-            zone.addEventListener('touchmove',(e)=>{
-                if(!active) return;
-                let t=e.touches[0];
-                let dx=t.clientX-startX, dy=t.clientY-startY;
-                let dist=Math.sqrt(dx*dx+dy*dy);
-                if(dist>45){ dx=dx/dist*45; dy=dy/dist*45; }
-                knob.style.transform=`translate(${dx}px, ${dy}px)`;
-                moveX=dx/45; moveY=dy/45;
-                if(gameState==='PARACHUTE'){
-                    playerMesh.position.x+=moveX*0.5;
-                    playerMesh.position.z+=moveY*0.5;
-                } else if(gameState==='GROUND'){
-                    playerMesh.position.x+=moveX*0.6;
-                    playerMesh.position.z+=moveY*0.6;
-                }
-                e.preventDefault();
-            },{passive:false});
-            zone.addEventListener('touchend',()=>{
-                active=false; knob.style.transform='translate(0,0)'; moveX=0; moveY=0;
-            });
-            fireBtn.addEventListener('touchstart',(e)=>{ e.preventDefault(); shoot(); });
-        }
-
-        function onWindowResize(){
-            camera.aspect=window.innerWidth/window.innerHeight;
-            camera.updateProjectionMatrix();
-            renderer.setSize(window.innerWidth,window.innerHeight);
-        }
-    </script>
-</body>
-</html>
-"""
-
+HTML_TEMPLATE = '''<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>CODM</title><style>*{margin:0;padding:0;box-sizing:border-box;font-family:Arial}body,html{width:100%;height:100%;overflow:hidden;background:#000;color:#fff}#canvas-container{width:100%;height:100%;position:absolute;top:0;left:0}#hud{position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;display:none}.interactive{pointer-events:auto}#auth-screen{position:absolute;width:100%;height:100%;background:#111;display:flex;justify-content:center;align-items:center;z-index:100}.card{background:#000;border:2px solid #ff9900;padding:30px;border-radius:12px;text-align:center;width:320px}.card input{width:100%;padding:12px;margin:10px 0;background:#222;color:#fff}.card button{width:100%;padding:12px;background:#ff9900;border:none;font-weight:bold}#stats-bar{position:absolute;top:15px;left:15px;background:rgba(0,0,0,.6);padding:10px;border-left:4px solid #ff9900}#weapon-info{position:absolute;bottom:20px;right:20px;background:rgba(0,0,0,.7);padding:15px}#action-btn{position:absolute;top:60%;left:50%;transform:translate(-50%,-50%);background:#ff9900;padding:15px 30px;border-radius:30px;display:none}#joystick-zone{position:absolute;bottom:30px;left:30px;width:120px;height:120px;background:rgba(255,255,255,.1);border-radius:50%;display:none}#joystick-knob{position:absolute;top:35px;left:35px;width:50px;height:50px;background:#f90;border-radius:50%}#mobile-fire{position:absolute;bottom:50px;right:30px;width:80px;height:80px;background:rgba(255,0,0,.6);border-radius:50%;display:none;align-items:center;justify-content:center}#damage-flash{position:absolute;top:0;left:0;width:100%;height:100%;background:rgba(255,0,0,.3);pointer-events:none;opacity:0}#loot-popup{position:absolute;top:40%;left:50%;transform:translate(-50%,-50%);background:gold;padding:10px 20px;border-radius:10px;color:#000;display:none}</style><script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script><script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.2/socket.io.min.js"></script></head><body><div id="auth-screen"><div class="card"><h1>CODM ULTIMATE</h1><input id="username-input" placeholder="Username"><button onclick="login()">ENTER</button></div></div><div id="canvas-container"></div><div id="damage-flash"></div><div id="loot-popup"></div><div id="hud"><div id="stats-bar"><div>HEALTH: <span id="hp-val">100</span></div><div id="status-val">IN PLANE</div><div id="weapon-name">AK-47</div><div id="ammo-count">30 / 30</div></div><button id="action-btn" class="interactive" onclick="executeContextAction()">JUMP</button><div id="joystick-zone" class="interactive"><div id="joystick-knob"></div></div><div id="mobile-fire" class="interactive">FIRE</div></div><script>
+let socket,scene,camera,renderer,localPlayer={id:'',username:'',hp:100},gameState='PLANE',planeMesh,playerMesh,parachuteMesh,otherPlayers={},lootBoxes=[],keys={};
+const WEAPONS={'AK-47':{ammo:30,maxAmmo:30,damage:35,fireRate:120},'M4A1':{ammo:30,maxAmmo:30,damage:25,fireRate:90},'Shotgun':{ammo:8,maxAmmo:8,damage:80,fireRate:600},'Sniper':{ammo:5,maxAmmo:5,damage:100,fireRate:1000},'Pistol':{ammo:12,maxAmmo:12,damage:20,fireRate:200}};
+let currentWeapon='AK-47',lastShotTime=0;
+function login(){let n=document.getElementById('username-input').value.trim();if(!n)return alert('Enter username');localPlayer.username=n;document.getElementById('auth-screen').style.display='none';document.getElementById('hud').style.display='block';initGame();initSocket();if('ontouchstart' in window){document.getElementById('joystick-zone').style.display='block';document.getElementById('mobile-fire').style.display='flex';setupMobileControls();}}
+function initSocket(){socket=io();socket.on('connect',()=>{localPlayer.id=socket.id;socket.emit('player_join',{username:localPlayer.username});});socket.on('current_players',p=>{for(let id in p){if(id!==socket.id)spawnOtherPlayer({id,...p[id]});}});socket.on('player_joined',d=>spawnOtherPlayer(d));socket.on('player_moved',d=>{if(otherPlayers[d.id])otherPlayers[d.id].position.set(d.x,d.y,d.z);});socket.on('player_shot_event',d=>{if(d.targetId===socket.id){localPlayer.hp-=d.damage;document.getElementById('hp-val').innerText=Math.max(0,localPlayer.hp);let f=document.getElementById('damage-flash');f.style.opacity='1';setTimeout(()=>f.style.opacity='0',100);if(localPlayer.hp<=0)respawnPlayer();}});socket.on('player_disconnected',id=>{if(otherPlayers[id]){scene.remove(otherPlayers[id]);delete otherPlayers[id];}});}
+function initGame(){scene=new THREE.Scene();scene.background=new THREE.Color(0x87ceeb);camera=new THREE.PerspectiveCamera(75,window.innerWidth/window.innerHeight,0.1,1000);renderer=new THREE.WebGLRenderer({antialias:true});renderer.setSize(window.innerWidth,window.innerHeight);document.getElementById('canvas-container').appendChild(renderer.domElement);scene.add(new THREE.AmbientLight(0xffffff,0.6));let ground=new THREE.Mesh(new THREE.PlaneGeometry(800,800),new THREE.MeshLambertMaterial({color:0x2e8b57}));ground.rotation.x=-Math.PI/2;scene.add(ground);buildMap();spawnLootBoxes();createPlane();playerMesh=new THREE.Mesh(new THREE.BoxGeometry(1,2,1),new THREE.MeshStandardMaterial({color:0x00ff00}));playerMesh.position.set(0,150,0);scene.add(playerMesh);parachuteMesh=new THREE.Mesh(new THREE.ConeGeometry(3,2,8),new THREE.MeshBasicMaterial({color:0xffffff,wireframe:true}));parachuteMesh.position.y=3;parachuteMesh.visible=false;playerMesh.add(parachuteMesh);window.addEventListener('resize',()=>{camera.aspect=window.innerWidth/window.innerHeight;camera.updateProjectionMatrix();renderer.setSize(window.innerWidth,window.innerHeight);});document.addEventListener('keydown',e=>{keys[e.code]=true;if(e.code==='Space'&&gameState==='PLANE')executeContextAction();if(e.code==='KeyR')reloadWeapon();});document.addEventListener('keyup',e=>{keys[e.code]=false;});document.addEventListener('mousedown',shoot);document.getElementById('action-btn').style.display='block';animate();}
+function buildMap(){let g=new THREE.BoxGeometry(12,8,12);for(let i=0;i<18;i++){let m=new THREE.Mesh(g,new THREE.MeshStandardMaterial({color:i%2?0x8b4513:0x555555}));let a=(i/18)*Math.PI*2,d=100+Math.random()*150;m.position.set(Math.cos(a)*d,4,Math.sin(a)*d);scene.add(m);}}
+function spawnLootBoxes(){let g=new THREE.BoxGeometry(2,2,2);for(let i=0;i<14;i++){let m=new THREE.Mesh(g,new THREE.MeshStandardMaterial({color:0xffff00,emissive:0x444400}));m.position.set((Math.random()-0.5)*400,1,(Math.random()-0.5)*400);scene.add(m);lootBoxes.push(m);}}
+function createPlane(){planeMesh=new THREE.Group();planeMesh.add(new THREE.Mesh(new THREE.BoxGeometry(24,4,8),new THREE.MeshStandardMaterial({color:0xccc})));planeMesh.position.set(-300,150,0);scene.add(planeMesh);}
+function spawnOtherPlayer(d){let m=new THREE.Mesh(new THREE.BoxGeometry(1,2,1),new THREE.MeshStandardMaterial({color:0xf00}));m.position.set(d.x||0,d.y||2,d.z||0);scene.add(m);otherPlayers[d.id]=m;}
+function executeContextAction(){if(gameState==='PLANE'){gameState='PARACHUTE';playerMesh.position.copy(planeMesh.position);parachuteMesh.visible=true;document.getElementById('status-val').innerText='PARACHUTING';document.getElementById('action-btn').style.display='none';}}
+function reloadWeapon(){WEAPONS[currentWeapon].ammo=WEAPONS[currentWeapon].maxAmmo;document.getElementById('ammo-count').innerText=WEAPONS[currentWeapon].ammo+' / '+WEAPONS[currentWeapon].maxAmmo;}
+function shoot(){if(gameState!=='GROUND')return;let now=Date.now(),w=WEAPONS[currentWeapon];if(now-lastShotTime<w.fireRate)return;if(w.ammo<=0)return reloadWeapon();w.ammo--;lastShotTime=now;document.getElementById('ammo-count').innerText=w.ammo+' / '+w.maxAmmo;let rc=new THREE.Raycaster();rc.setFromCamera(new THREE.Vector2(0,0),camera);let hits=rc.intersectObjects(Object.values(otherPlayers));if(hits.length>0){let obj=hits[0].object;for(let id in otherPlayers)if(otherPlayers[id]===obj){socket.emit('shoot_player',{targetId:id,damage:w.damage});break;}}let lh=rc.intersectObjects(lootBoxes);if(lh.length>0){let b=lh[0].object;scene.remove(b);lootBoxes=lootBoxes.filter(x=>x!==b);let ks=Object.keys(WEAPONS);currentWeapon=ks[Math.floor(Math.random()*ks.length)];document.getElementById('weapon-name').innerText=currentWeapon;reloadWeapon();let el=document.getElementById('loot-popup');el.innerText='LOOTED '+currentWeapon;el.style.display='block';setTimeout(()=>el.style.display='none',2000);}}
+function respawnPlayer(){alert('KILLED');localPlayer.hp=100;document.getElementById('hp-val').innerText='100';gameState='PLANE';planeMesh.position.set(-300,150,0);document.getElementById('action-btn').style.display='block';document.getElementById('status-val').innerText='IN PLANE';}
+function animate(){requestAnimationFrame(animate);if(gameState==='PLANE'){planeMesh.position.x+=1.5;if(planeMesh.position.x>300)planeMesh.position.x=-300;camera.position.set(planeMesh.position.x-20,planeMesh.position.y+10,planeMesh.position.z);camera.lookAt(planeMesh.position);}else if(gameState==='PARACHUTE'){playerMesh.position.y-=0.4;if(keys['KeyW'])playerMesh.position.z-=0.5;if(keys['KeyS'])playerMesh.position.z+=0.5;if(keys['KeyA'])playerMesh.position.x-=0.5;if(keys['KeyD'])playerMesh.position.x+=0.5;camera.position.set(playerMesh.position.x,playerMesh.position.y+8,playerMesh.position.z+15);camera.lookAt(playerMesh.position);if(playerMesh.position.y<=2){playerMesh.position.y=2;gameState='GROUND';parachuteMesh.visible=false;document.getElementById('status-val').innerText='ON GROUND';}}else if(gameState==='GROUND'){let sp=keys['ShiftLeft']?0.8:0.4;if(keys['KeyW'])playerMesh.position.z-=sp;if(keys['KeyS'])playerMesh.position.z+=sp;if(keys['KeyA'])playerMesh.position.x-=sp;if(keys['KeyD'])playerMesh.position.x+=sp;camera.position.set(playerMesh.position.x,playerMesh.position.y+1.5,playerMesh.position.z);if(socket)socket.emit('player_move',{x:playerMesh.position.x,y:playerMesh.position.y,z:playerMesh.position.z});}renderer.render(scene,camera);}
+function setupMobileControls(){let zone=document.getElementById('joystick-zone'),knob=document.getElementById('joystick-knob'),fire=document.getElementById('mobile-fire'),sx=0,sy=0,act=false;zone.addEventListener('touchstart',e=>{act=true;sx=e.touches[0].clientX;sy=e.touches[0].clientY;});zone.addEventListener('touchmove',e=>{if(!act)return;let dx=e.touches[0].clientX-sx,dy=e.touches[0].clientY-sy,d=Math.sqrt(dx*dx+dy*dy);if(d>45){dx=dx/d*45;dy=dy/d*45;}knob.style.transform='translate('+dx+'px,'+dy+'px)';let mx=dx/45,my=dy/45;if(gameState==='PARACHUTE'){playerMesh.position.x+=mx*0.5;playerMesh.position.z+=my*0.5;}else if(gameState==='GROUND'){playerMesh.position.x+=mx*0.6;playerMesh.position.z+=my*0.6;}e.preventDefault();},{passive:false});zone.addEventListener('touchend',()=>{act=false;knob.style.transform='translate(0,0)';});fire.addEventListener('touchstart',e=>{e.preventDefault();shoot();});}
+</script></body></html>'''
 @app.route('/')
 def home():
     return render_template_string(HTML_TEMPLATE)
-
 @socketio.on('player_join')
 def handle_join(data):
-    PLAYERS[request.sid] = {'username': data['username'], 'x':0,'y':150,'z':0,'kills':0}
-    socketio.emit('player_joined', {'id': request.sid, **PLAYERS[request.sid]})
-    # send existing players
-    from flask import request
-    socketio.emit('current_players', PLAYERS, to=request.sid)
-
+    PLAYERS[request.sid] = {'username': data['username'], 'x':0,'y':150,'z':0}
+    emit('current_players', PLAYERS, to=request.sid)
+    emit('player_joined', {'id': request.sid, **PLAYERS[request.sid]}, broadcast=True, include_self=False)
 @socketio.on('player_move')
 def handle_move(data):
     if request.sid in PLAYERS:
         PLAYERS[request.sid].update(data)
-        socketio.emit('player_moved', {'id': request.sid, **data}, broadcast=True, include_self=False)
-
+        emit('player_moved', {'id': request.sid, **data}, broadcast=True, include_self=False)
 @socketio.on('shoot_player')
 def handle_shoot(data):
-    target = data.get('targetId')
-    dmg = data.get('damage', 25)
-    if target in PLAYERS:
-        socketio.emit('player_shot_event', {'targetId': target, 'damage': dmg, 'shooter': request.sid}, broadcast=True)
-        # kill tracking
-        if target in PLAYERS:
-            # simplistic: if shooter kills, increase
-            pass
-
+    emit('player_shot_event', {'targetId': data.get('targetId'), 'damage': data.get('damage',25), 'shooter': request.sid}, broadcast=True)
 @socketio.on('disconnect')
 def handle_disconnect():
-    if request.sid in PLAYERS:
-        del PLAYERS[request.sid]
-    socketio.emit('player_disconnected', request.sid, broadcast=True)
-
+    PLAYERS.pop(request.sid, None)
+    emit('player_disconnected', request.sid, broadcast=True)
 if __name__ == '__main__':
     socketio.run(app, host='0.0.0.0', port=10000)
